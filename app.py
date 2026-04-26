@@ -115,7 +115,7 @@ def send_to_n8n(n8n_url, text, extracted_json, question, recipient):
         return {"status": "Simulated"}
 
     payload = {
-        "text": text,
+        "chatInput": text,
         "extracted_json": extracted_json,
         "question": question,
         "recipient_email": recipient,
