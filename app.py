@@ -3,7 +3,6 @@ import io
 import os
 import requests
 import streamlit as st
-from pathlib import Path
 from openai import OpenAI
 
 try:
@@ -16,9 +15,8 @@ st.set_page_config(page_title="AI Document Orchestrator", layout="wide")
 # --- Helpers ---
 
 def get_secret(name: str):
-    if hasattr(st, "secrets"):
-        if name in st.secrets:
-            return st.secrets[name]
+    if hasattr(st, "secrets") and name in st.secrets:
+        return st.secrets[name]
     return os.environ.get(name)
 
 
@@ -27,6 +25,13 @@ def load_client():
     if not api_key:
         return None
     return OpenAI(api_key=api_key)
+
+
+def mask_email(email):
+    if not email or "@" not in email:
+        return email
+    name, domain = email.split("@")
+    return name[:2] + "***@" + domain
 
 
 def extract_text(uploaded_file) -> str:
@@ -48,17 +53,6 @@ def extract_text(uploaded_file) -> str:
     return ""
 
 
-def build_schema():
-    return {
-        "summary": "",
-        "risk_level": "",
-        "currency": "",
-        "amount": 0,
-        "amount_in_usd": 0,
-        "insights": []
-    }
-
-
 def demo_extraction(question: str):
     return {
         "summary": "(DEMO MODE)",
@@ -70,7 +64,6 @@ def demo_extraction(question: str):
     }
 
 
-# 
 def call_openai(client, text: str, question: str):
     if not client:
         st.warning("Missing OPENAI_API_KEY")
@@ -143,6 +136,8 @@ Recipient Email:
     except Exception as e:
         st.error(f"n8n error: {e}")
         return None
+
+
 # --- UI ---
 
 st.title("AI Document Orchestrator")
@@ -172,7 +167,7 @@ if st.session_state.data:
     amount = st.session_state.data.get("amount_in_usd", 0)
 
     if risk == "High" or amount > 500:
-        st.warning(" Action Required")
+        st.warning("⚠️ Action Required")
 
         email = st.text_input("Recipient email")
 
@@ -184,6 +179,18 @@ if st.session_state.data:
                 question,
                 email
             )
-            st.success(f"Sent: {resp}")
+
+            if resp:
+                st.success("✅ Alert sent successfully")
+
+                st.markdown("### 📊 Summary")
+                st.write(resp.get("final_answer", "N/A"))
+
+                st.markdown("### 📧 Email Sent To")
+                st.write(mask_email(email))
+
+                with st.expander("🔍 View Full Details (Sensitive)"):
+                    st.json(resp)
+
     else:
         st.success("✅ No action needed")
