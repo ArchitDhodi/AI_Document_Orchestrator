@@ -115,7 +115,22 @@ def send_to_n8n(n8n_url, text, extracted_json, question, recipient):
         return {"status": "Simulated"}
 
     payload = {
-        "chatInput": text,
+    "chatInput": f"""
+    Analyze this document and prepare the final alert/email.
+
+    User Question:
+    {question}
+
+    Extracted JSON:
+    {json.dumps(extracted_json, indent=2)}
+
+    Document Text:
+    {text}
+
+    Recipient Email:
+    {recipient}
+    """,
+        "text": text,
         "extracted_json": extracted_json,
         "question": question,
         "recipient_email": recipient,
