@@ -4,29 +4,14 @@ import os
 import requests
 import streamlit as st
 from pathlib import Path
-
-# --- Compatibility Imports ---
-try:
-    import tomllib  # Python 3.11+ standard library
-except ImportError:
-    try:
-        import tomli as tomllib  # Python < 3.11 fallback
-    except ImportError:
-        tomllib = None
-
-try:
-    import google.generativeai as genai
-except ImportError:
-    genai = None
+from openai import OpenAI
 
 try:
     import pdfplumber
 except ImportError:
     pdfplumber = None
 
-# --- Page Config ---
 st.set_page_config(page_title="AI Document Orchestrator", layout="wide")
-
 
 # --- Helpers ---
 
@@ -34,139 +19,100 @@ def get_secret(name: str):
     if hasattr(st, "secrets"):
         if name in st.secrets:
             return st.secrets[name]
-        for key in st.secrets:
-            if key.lstrip('\ufeff') == name:
-                return st.secrets[key]
     return os.environ.get(name)
 
 
 def load_client():
-    if genai is None:
-        return None
     api_key = get_secret("OPENAI_API_KEY")
     if not api_key:
         return None
-    genai.configure(api_key=api_key)
-    return genai
+    return OpenAI(api_key=api_key)
 
 
 def extract_text(uploaded_file) -> str:
     if uploaded_file is None:
         return ""
     mime = (uploaded_file.type or "").lower()
-    
+
     if "text" in mime or uploaded_file.name.lower().endswith(".txt"):
         return uploaded_file.getvalue().decode("utf-8", errors="ignore")
 
     if "pdf" in mime or uploaded_file.name.lower().endswith(".pdf"):
         if pdfplumber is None:
-            return "(pdfplumber not installed; cannot parse PDF)"
+            return "(pdfplumber not installed)"
         try:
             with pdfplumber.open(io.BytesIO(uploaded_file.getvalue())) as pdf:
-                pages = [page.extract_text() or "" for page in pdf.pages]
-                return "\n".join(pages)
+                return "\n".join([p.extract_text() or "" for p in pdf.pages])
         except Exception as e:
-            return f"(Error reading PDF: {e})"
+            return f"(PDF error: {e})"
     return ""
 
 
 def build_schema():
     return {
-        "type": "object",
-        "properties": {
-            "summary": {"type": "string", "description": "A detailed 2-3 sentence summary including Vendor, Key Dates, and Total Amount (with currency symbol)."},
-            "risk_level": {"type": "string", "description": "High/Medium/Low"},
-            "currency": {"type": "string", "description": "Currency symbol or code (e.g. $, €, ₹)"},
-            "amount": {"type": "number", "description": "Numeric amount in original currency"},
-            "amount_in_usd": {"type": "number", "description": "The amount converted to USD (approximate)"},
-            "insights": {
-                "type": "array",
-                "description": "Top 4 key insights only (e.g. Vendor, Invoice No, Due Date, PO No)",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "field": {"type": "string"},
-                        "value": {"type": "string"}
-                    },
-                    "required": ["field", "value"]
-                }
-            }
-        },
-        "required": ["summary", "insights", "risk_level", "amount", "currency", "amount_in_usd"]
+        "summary": "",
+        "risk_level": "",
+        "currency": "",
+        "amount": 0,
+        "amount_in_usd": 0,
+        "insights": []
     }
 
 
 def demo_extraction(question: str):
     return {
-        "summary": "(DEMO) API Key missing. Showing placeholder.",
-        "risk_level": "High",
+        "summary": "(DEMO MODE)",
+        "risk_level": "Low",
         "currency": "$",
-        "amount": 12500.0,
-        "amount_in_usd": 12500.0,
-        "insights": [
-            {"field": "question", "value": question or "Example"},
-            {"field": "demo_note", "value": "Configure OPENAI_API_KEY to see real data"}
-        ]
+        "amount": 100,
+        "amount_in_usd": 100,
+        "insights": [{"field": "demo", "value": "API key missing"}]
     }
 
 
-def call_openai(_client, text: str, question: str):
-    if genai is None:
-        st.error("google-generativeai library is not installed.")
-        return demo_extraction(question)
-        
-    api_key = get_secret("OPENAI_API_KEY")
-    if not api_key:
-        st.warning("OPENAI_API_KEY not found in secrets.")
+# 
+def call_openai(client, text: str, question: str):
+    if not client:
+        st.warning("Missing OPENAI_API_KEY")
         return demo_extraction(question)
 
     if not text.strip():
-        st.error("No text extracted from the document.")
+        st.error("No text extracted")
         return None
 
-    # Prompt: Forces currency in summary + Top 4 insights
-    prompt = (
-        "You are an expert document analyst. Extract a comprehensive structured summary. "
-        "1. **Summary**: Write a detailed summary identifying Vendor, Purpose, and Dates. "
-        "   **IMPORTANT**: When mentioning the Total Amount in the summary, YOU MUST include the currency symbol (e.g. 'Total due is $500' or '₹500'). "
-        "2. **Insights**: Extract exactly the **Top 4** most critical fields (e.g., Invoice No, Vendor, Due Date, PO #). "
-        "3. **Currency**: Identify the currency symbol. "
-        "4. **Amount**: Extract the total numeric amount. "
-        "5. **USD Conversion**: If not in USD, convert to USD approx. "
-        "6. **Risk**: Assess Risk Level (High/Medium/Low). "
-        "Return strictly valid JSON matching the provided schema."
-    )
-    
-    model_name = "gpt-5.4-mini-2026-03-17"
+    prompt = """
+You are an expert document analyst.
+
+Return STRICT JSON with:
+- summary (must include currency symbol)
+- risk_level (High/Medium/Low)
+- currency
+- amount
+- amount_in_usd
+- insights (exactly 4 key fields)
+"""
 
     try:
-        model = genai.GenerativeModel(model_name)
-        generation_config = genai.types.GenerationConfig(
-            response_mime_type="application/json",
-            response_schema=build_schema(),
+        response = client.chat.completions.create(
+            model="gpt-5.4-mini-2026-03-17",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": f"{question}\n\n{text}"}
+            ],
             temperature=0,
+            response_format={"type": "json_object"}
         )
 
-        response = model.generate_content(
-            [prompt, f"Question: {question}", f"Document Text:\n{text}"],
-            generation_config=generation_config,
-        )
-        
-        if response.text:
-            return json.loads(response.text)
-            
+        return json.loads(response.choices[0].message.content)
+
     except Exception as e:
         st.error(f"OpenAI API Error: {str(e)}")
-        if "404" in str(e):
-            st.error(f"Model '{model_name}' not found. Check your API Key tier.")
-            
-    return demo_extraction(question)
+        return demo_extraction(question)
 
 
-def send_to_n8n(n8n_url: str, text: str, extracted_json: dict, question: str, recipient: str):
+def send_to_n8n(n8n_url, text, extracted_json, question, recipient):
     if not n8n_url:
-        st.info("Demo mode: N8N_WEBHOOK_URL missing.")
-        return {"status": "Simulated Sent"}
+        return {"status": "Simulated"}
 
     payload = {
         "text": text,
@@ -174,214 +120,56 @@ def send_to_n8n(n8n_url: str, text: str, extracted_json: dict, question: str, re
         "question": question,
         "recipient_email": recipient,
     }
-    
+
     try:
-        resp = requests.post(n8n_url, json=payload, timeout=30)
-        resp.raise_for_status()
+        resp = requests.post(n8n_url, json=payload)
         return resp.json()
-    except Exception as exc:
-        st.error(f"n8n call failed: {exc}")
+    except Exception as e:
+        st.error(f"n8n error: {e}")
         return None
 
 
 # --- UI ---
 
-st.markdown(
-    """
-    <style>
-        .stApp { background-color: #f3e7d9; }
-        
-        h1, h2, h3, label, .stMarkdown p, .stSubheader { color: #e6682d !important; }
-        
-        [data-testid="stFileUploader"] section div[data-testid="stFileUploaderDropzoneInstructions"] > div > small,
-        [data-testid="stFileUploader"] div > div > small, 
-        .uploadedFileName {
-            color: #e6682d !important;
-        }
-        
-        [data-testid="stFileUploader"] div[data-testid="stFileUploaderFileName"] {
-             color: #e6682d !important;
-        }
+st.title("AI Document Orchestrator")
 
-        .stSpinner > div > div {
-            color: #e6682d !important;
-            font-weight: 500;
-        }
+uploaded = st.file_uploader("Upload PDF or TXT", type=["pdf", "txt"])
 
-        .status-box {
-            padding: 12px 15px;
-            border-radius: 8px;
-            margin: 10px 0;
-            background-color: #ffffff;
-            border-left: 5px solid;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-            color: #333 !important;
-        }
-        .status-success { border-left-color: #28a745; }
-        .status-warning { border-left-color: #ffc107; }
-        .status-info    { border-left-color: #17a2b8; }
-        
-        div[data-testid="stVerticalBlock"] > div { gap: 0.5rem; }
-        
-        .question-card {
-            background: #fff7ef; 
-            border: 1px solid #f0e0d2;
-            padding: 12px; 
-            border-radius: 10px; 
-            margin-bottom: 20px;
-        }
-        .question-card, .question-card strong, .question-card div {
-            color: #000000 !important;
-        }
-        
-        [data-testid="stFileUploader"] svg { color: #e6682d !important; }
-    </style>
-    """,
-    unsafe_allow_html=True,
+question = st.text_input(
+    "Ask a question",
+    value="Extract invoice details"
 )
 
-left, right = st.columns([0.9, 1.1])
+if "data" not in st.session_state:
+    st.session_state.data = None
 
-# --- LEFT COLUMN ---
-with left:
-    st.title("AI Document Orchestrator")
-    st.markdown("Upload a PDF/TXT, extract structured data with OpenAi, then trigger an n8n alert.")
+if uploaded:
+    text = extract_text(uploaded)
+    client = load_client()
 
-    uploaded = st.file_uploader("Upload PDF or TXT", type=["pdf", "txt"])
-    
-    # REQUIREMENT CHECK #1: Text Input for User Question
-    question = st.text_input(
-        "Ask a specific question about the document:",
-        value="Extract key invoice details including dates, amounts, and vendor info."
-    )
-    
-    # Target Box with Black Text
-    st.markdown(
-        """
-        <div class="question-card">
-            <strong>Target Extraction (Top 4):</strong><br>
-            &bull; Vendor Name<br>
-            &bull; Invoice Number<br>
-            &bull; Due Date<br>
-            &bull; Total Amount (USD)
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    if st.button("Analyze"):
+        with st.spinner("Processing..."):
+            st.session_state.data = call_openai(client, text, question)
 
-    if "extracted_json" not in st.session_state:
-        st.session_state.extracted_json = None
-    if "extracted_text" not in st.session_state:
-        st.session_state.extracted_text = ""
-    if "last_file" not in st.session_state:
-        st.session_state.last_file = None
+if st.session_state.data:
+    st.json(st.session_state.data)
 
-    if uploaded:
-        current_text = extract_text(uploaded)
-        if st.session_state.last_file != uploaded.name:
-            st.session_state.extracted_text = current_text
-            st.session_state.last_file = uploaded.name
-            
-            client = load_client()
-            with st.spinner("Analyzing document with GPT..."):
-                st.session_state.extracted_json = call_openai(client, current_text, question)
-        
-        # Extraction Complete Message
-        if st.session_state.extracted_json:
-            st.markdown(
-                '<div class="status-box status-success">✅ Extraction Complete</div>', 
-                unsafe_allow_html=True
+    risk = st.session_state.data.get("risk_level", "Low")
+    amount = st.session_state.data.get("amount_in_usd", 0)
+
+    if risk == "High" or amount > 500:
+        st.warning("⚠️ Action Required")
+
+        email = st.text_input("Recipient email")
+
+        if st.button("Send Alert"):
+            resp = send_to_n8n(
+                get_secret("N8N_WEBHOOK_URL"),
+                text,
+                st.session_state.data,
+                question,
+                email
             )
-
-    if uploaded and st.button("Re-run Analysis", type="primary"):
-        client = load_client()
-        with st.spinner("Re-analyzing..."):
-            st.session_state.extracted_json = call_openai(
-                client, st.session_state.extracted_text, question
-            )
-
-    # Status & Alerts
-    if st.session_state.extracted_json:
-        data = st.session_state.extracted_json
-        
-        risk = data.get("risk_level", "Low")
-        amount = data.get("amount", 0)
-        currency = data.get("currency", "$")
-        amount_in_usd = data.get("amount_in_usd", 0)
-        
-        is_high_risk = risk == "High"
-        is_high_value = isinstance(amount_in_usd, (int, float)) and amount_in_usd > 500
-        
-        st.write("") 
-        
-        if is_high_risk or is_high_value:
-            # High Risk Alert
-            st.subheader(f"⚠️ Action Required")
-            st.markdown(f"**Reason:** {risk} Risk / Amount > $500")
-            
-            recipient = st.text_input("Recipient email")
-            
-            if st.button("Send Alert to n8n", disabled=not recipient):
-                n8n_url = get_secret("N8N_WEBHOOK_URL")
-                with st.spinner("Triggering workflow..."):
-                    resp = send_to_n8n(
-                        n8n_url, 
-                        st.session_state.extracted_text, 
-                        st.session_state.extracted_json, 
-                        question, 
-                        recipient
-                    )
-                if resp:
-                    # REQUIREMENT CHECK #4: Display all n8n outputs
-                    st.markdown(
-                        f'<div class="status-box status-success">🚀 Alert Status: {resp.get("status", "Sent")}</div>', 
-                        unsafe_allow_html=True
-                    )
-                    
-                    with st.expander("View Automation Details", expanded=True):
-                        st.markdown(f"**Final Analytical Answer:**\n\n{resp.get('final_answer', 'N/A')}")
-                        st.divider()
-                        st.markdown(f"**Generated Email Body:**\n\n{resp.get('email_body', 'N/A')}")
-
-        else:
-            # No Action Needed
-            st.markdown(
-                f"""
-                <div class="status-box status-success">
-                    <div style="font-weight: 600; font-size: 1.05em;">✅ No Action Needed</div>
-                    <div style="font-size: 0.9em; color: #555; margin-top: 4px;">
-                        Risk: {risk} &bull; Amount: {currency}{amount} (${amount_in_usd:.2f})
-                    </div>
-                </div>
-                """, 
-                unsafe_allow_html=True
-            )
-            
-            st.markdown(
-                """
-                <div class="status-box status-info">
-                    ℹ️ Note: Email alerts are only triggered for High Risk or amounts over $500 USD.
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-# --- RIGHT COLUMN ---
-with right:
-    st.subheader("Analysis Results")
-    if st.session_state.extracted_json:
-        st.json(st.session_state.extracted_json)
+            st.success(f"Sent: {resp}")
     else:
-        st.markdown(
-            """
-            <div style="
-                border: 2px dashed #f0e0d2; 
-                padding: 40px; 
-                border-radius: 10px; 
-                text-align: center; 
-                color: #e6682d;">
-                Waiting for document...
-            </div>
-            """, 
-            unsafe_allow_html=True
-        )
+        st.success("✅ No action needed")
