@@ -158,7 +158,7 @@ if st.session_state.data:
     amount = st.session_state.data.get("amount_in_usd", 0)
 
     if risk == "High" or amount > 500:
-        st.warning("⚠️ Action Required")
+        st.warning(" Action Required")
 
         email = st.text_input("Recipient email")
 
