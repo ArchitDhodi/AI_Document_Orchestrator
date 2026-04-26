@@ -115,21 +115,21 @@ def send_to_n8n(n8n_url, text, extracted_json, question, recipient):
         return {"status": "Simulated"}
 
     payload = {
-    "chatInput": f"""
-    Analyze this document and prepare the final alert/email.
+        "chatInput": f"""
+Analyze this document and prepare the final alert/email.
 
-    User Question:
-    {question}
+User Question:
+{question}
 
-    Extracted JSON:
-    {json.dumps(extracted_json, indent=2)}
+Extracted JSON:
+{json.dumps(extracted_json, indent=2)}
 
-    Document Text:
-    {text}
+Document Text:
+{text}
 
-    Recipient Email:
-    {recipient}
-    """,
+Recipient Email:
+{recipient}
+""",
         "text": text,
         "extracted_json": extracted_json,
         "question": question,
@@ -137,13 +137,12 @@ def send_to_n8n(n8n_url, text, extracted_json, question, recipient):
     }
 
     try:
-        resp = requests.post(n8n_url, json=payload)
+        resp = requests.post(n8n_url, json=payload, timeout=30)
+        resp.raise_for_status()
         return resp.json()
     except Exception as e:
         st.error(f"n8n error: {e}")
         return None
-
-
 # --- UI ---
 
 st.title("AI Document Orchestrator")
